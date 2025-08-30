@@ -6,7 +6,6 @@ import asyncio
 from dotenv import load_dotenv
 from app.main import SignedResponse
 
-
 load_dotenv()
 BASE_URL = "http://127.0.0.1:8000"
 OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY")

@@ -19,7 +19,6 @@ from slowapi.errors import RateLimitExceeded
 
 load_dotenv()
 
-# Configure logging
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 

@@ -9,7 +9,6 @@ from get_sig import call_proxy
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-
 load_dotenv()
 BASE_URL = "http://127.0.0.1:8000"
 HOTKEY = os.environ.get("HOTKEY")
