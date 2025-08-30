@@ -1,0 +1,16 @@
+# Keys
+private.pem
+public.pem
+*.pem
+
+# Environment
+.env
+tests/.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# UV
+uv.lock
