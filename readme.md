@@ -1,5 +1,4 @@
-# OpenRouter Proxy - Quick Setup
-Lightweight llm proxy to enable verifiable inference via openrouter/openai
+# V.I. Proxy
 
 ## Generate ED25519 Keys
 ```bash
@@ -9,13 +8,13 @@ openssl pkey -in private.pem -pubout -out public.pem
 
 ## Configure Environment
 
-### `proxy/.env` (for the server)
+### `proxy/.env` (server)
 ```
 private=./private.pem
 public=./public.pem
 ```
 
-### `proxy/tests/.env` (for testing)
+### `proxy/tests/.env` (testing)
 ```
 OPENROUTER_KEY=sk-or-v1-xxxxx
 OPENAI_KEY=sk-xxxxx
