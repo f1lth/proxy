@@ -1,4 +1,5 @@
 # OpenRouter Proxy - Quick Setup
+Lightweight llm proxy to enable verifiable inference via openrouter/openai
 
 ## Generate ED25519 Keys
 ```bash
