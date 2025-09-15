@@ -17,6 +17,9 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
+from bitrecs.llms.factory import LLM, LLMFactory
+
+
 load_dotenv()
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
@@ -77,26 +80,101 @@ async def health():
 async def pubkey(request: Request) -> Dict[str, str]:
     return {"PUBKEY": PUBLIC_SIGNING_KEY.decode()}
 
+# @app.post("/v1/chat/completions", response_model=SignedResponse)
+# @limiter.limit("60/minute")
+# async def forward_proxy_request(
+#     request: Request,
+#     completion_request: ChatCompletionRequest,
+#     authorization: str = Header(),  
+#     x_hotkey: str = Header()
+# ) -> SignedResponse:
+#     request_id = str(uuid.uuid4())
+#     logger.info(f"Request {request_id} from hotkey: {x_hotkey}, model: {completion_request.model}")
+    
+#     try:
+#         # Filter openai or openrouter
+#         if authorization.startswith("Bearer sk-or-"):
+#             url = "https://openrouter.ai/api/v1/chat/completions"
+#         elif authorization.startswith("Bearer sk-"):
+#             url = "https://api.openai.com/v1/chat/completions"
+#         else:
+#             logger.warning(f"Unknown API key format for request {request_id}")
+#             raise HTTPException(400, "Unknown API key format")
+
+#         payload = completion_request.dict(exclude_unset=True)
+
+#         # Send the request to openai or openrouter
+#         response = await client.post(
+#             url,
+#             json=payload,
+#             headers={"Authorization": authorization}
+#         )
+        
+#         if response.status_code != 200:
+#             logger.error(f"Upstream error for request {request_id}: {response.status_code}")
+#             raise HTTPException(status_code=response.status_code, detail=response.text)
+
+#         # Form the proof payload
+#         proof = {}
+#         proof["timestamp"] = datetime.utcnow().isoformat()        
+#         proof["request_hash"] = hashlib.sha256(json.dumps(completion_request.dict()).encode()).hexdigest()
+#         proof["response_hash"] = hashlib.sha256(response.content).hexdigest()
+#         proof["hotkey"] = x_hotkey
+#         proof["model"] = completion_request.model
+#         proof["unique_id"] = request_id
+
+#         # Sign the proof
+#         serialized_proof = json.dumps(proof).encode()
+#         signature = PRIVATE_SIGNING_KEY.sign(serialized_proof)
+        
+#         logger.info(f"Request {request_id} completed successfully")
+        
+#         # Return SignedResponse
+#         return SignedResponse(
+#             response=response.json(),
+#             proof=proof,
+#             signature=base64.b64encode(signature).decode()
+#         )
+
+#     except httpx.TimeoutException:
+#         logger.error(f"Timeout for request {request_id}")
+#         raise HTTPException(504, "Upstream timeout")
+#     except httpx.HTTPError as e:
+#         logger.error(f"HTTP error for request {request_id}: {str(e)}")
+#         raise HTTPException(502, f"Upstream error: {str(e)}")
+#     except HTTPException as e:
+#         raise e
+#     except Exception as e:
+#         logger.error(f"Unexpected error for request {request_id}: {str(e)}")
+#         raise HTTPException(status_code=500, detail=str(e))
+    
+
 @app.post("/v1/chat/completions", response_model=SignedResponse)
 @limiter.limit("60/minute")
 async def forward_proxy_request(
     request: Request,
     completion_request: ChatCompletionRequest,
     authorization: str = Header(),  
-    x_hotkey: str = Header()
+    x_hotkey: str = Header(),
+    x_provider: str = Header()
 ) -> SignedResponse:
     request_id = str(uuid.uuid4())
     logger.info(f"Request {request_id} from hotkey: {x_hotkey}, model: {completion_request.model}")
     
     try:
-        # Filter openai or openrouter
-        if authorization.startswith("Bearer sk-or-"):
-            url = "https://openrouter.ai/api/v1/chat/completions"
-        elif authorization.startswith("Bearer sk-"):
-            url = "https://api.openai.com/v1/chat/completions"
-        else:
-            logger.warning(f"Unknown API key format for request {request_id}")
-            raise HTTPException(400, "Unknown API key format")
+
+        match x_provider:
+            case "CHAT_GPT":
+                url = "https://api.openai.com/v1/chat/completions"
+            case "OPENROUTER":
+                url = "https://openrouter.ai/api/v1/chat/completions"
+            case "GEMINI":
+                url = "https://generativelanguage.googleapis.com/v1beta/openai"
+            case "CHUTES":
+                url = "https://llm.chutes.ai/v1/chat/completions"
+            case _:
+                logger.warning(f"Unknown provider for request {request_id}")
+                raise HTTPException(400, "Unknown provider")
 
         payload = completion_request.dict(exclude_unset=True)
 
@@ -144,6 +222,8 @@ async def forward_proxy_request(
     except Exception as e:
         logger.error(f"Unexpected error for request {request_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
 
 @app.post("/verify")
 async def verify_endpoint(

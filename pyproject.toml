@@ -6,11 +6,12 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "asyncio>=4.0.0",
-    "cryptography>=45.0.6",
+    "cryptography>=45.0.5",
     "dotenv>=0.9.9",
-    "fastapi>=0.116.1",
+    "fastapi>=0.110.1",
     "httpx>=0.28.1",
     "openai>=1.102.0",
     "slowapi>=0.1.9",
     "uvicorn>=0.35.0",
+    "bitrecs @ git+https://github.com/bitrecs/bitrecs-subnet.git@feat/group"
 ]

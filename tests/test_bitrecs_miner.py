@@ -34,7 +34,9 @@ async def main():
         "model": "gpt-4o-mini",
         "messages": [{"role": "user", "content": "Hello, how are you?"}]
     }
-    headers = {"Authorization": f"Bearer {OPENAI_KEY}", "x-hotkey": HOTKEY}
+    headers = {"Authorization": f"Bearer {OPENAI_KEY}", 
+               "x-hotkey": HOTKEY, 
+               "x-provider": "CHAT_GPT"}
     
     response = await call_proxy(request, headers)
     print(json.dumps(response, indent=2))
