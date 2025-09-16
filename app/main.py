@@ -1,10 +1,12 @@
 import os
+import gc
 import json
 import uuid
 import hashlib
 import base64
 import httpx
 import uvicorn
+import asyncio
 import logging
 from typing import Union, Dict
 from dotenv import load_dotenv
@@ -17,8 +19,10 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
+import bittensor as bt
 from bitrecs.llms.factory import LLM, LLMFactory
 
+global metagraph
 
 load_dotenv()
 
@@ -29,6 +33,11 @@ app = FastAPI()
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+@app.on_event("startup")
+async def startup():
+    asyncio.create_task(update_metagraph_data())
 
 client = httpx.AsyncClient(timeout=httpx.Timeout(60.0))
 
@@ -161,8 +170,15 @@ async def forward_proxy_request(
     request_id = str(uuid.uuid4())
     logger.info(f"Request {request_id} from hotkey: {x_hotkey}, model: {completion_request.model}")
     
-    try:
+    # first make sure hotkey has stake in the metagraph , and the request ip matches that hotkeys's axon ip
+    if not await check_hotkey_stake(x_hotkey):
+        logger.warning(f"Hotkey {x_hotkey} does not have stake in the metagraph")
+        raise HTTPException(400, "INVALID REQUEST HOTKEY MISMATCH")
+    if not await check_request_ip(request.client.host, x_hotkey):
+        logger.warning(f"Request IP {request.client.host} does not match hotkey {x_hotkey}'s axon IP")
+        raise HTTPException(400, "INVALID REQUEST IP MISMATCH")
 
+    try:
         match x_provider:
             case "CHAT_GPT":
                 url = "https://api.openai.com/v1/chat/completions"
@@ -172,6 +188,10 @@ async def forward_proxy_request(
                 url = "https://generativelanguage.googleapis.com/v1beta/openai"
             case "CHUTES":
                 url = "https://llm.chutes.ai/v1/chat/completions"
+            case "GROQ":
+                url = "https://api.groq.com/openai/v1/chat/completions"
+            case "CEREBRAS":
+                url = "https://api.cerebras.ai/v1/chat/completions"
             case _:
                 logger.warning(f"Unknown provider for request {request_id}")
                 raise HTTPException(400, "Unknown provider")
@@ -247,3 +267,140 @@ async def verify_endpoint(
             "valid": False,
             "error": "Invalid signature"
         }
+
+
+async def update_metagraph_data():
+    while True:
+        global metagraph
+        result = await get_metagraph_data()
+        if result is not None:
+            metagraph = result
+        await asyncio.sleep(300)
+
+
+async def get_metagraph_data() -> dict:
+    """Get the metagraph data."""
+    try:
+        network = "finney"
+        netuid = 122
+
+        logger.info(f'Fetching metagraph data for {network}:{netuid}...')
+        subnet = bt.metagraph(netuid=netuid, network=network)
+
+        # Extract all relevant data from metagraph
+        data = {
+            'uids': [],
+            'network_info': {
+                'netuid': netuid,
+                'network': network,
+                'block': int(subnet.block) if hasattr(subnet, 'block') else None,
+                'total_neurons': len(subnet.uids),
+                'timestamp': datetime.now().isoformat()
+            },
+            'aggregated_stats': {}
+        }
+
+        for i, uid in enumerate(subnet.uids.tolist()):
+            try:
+                # Safer data extraction with bounds checking
+                def safe_get_value(tensor, uid, default=0.0):
+                    try:
+                        if tensor is not None and len(tensor) > uid:
+                            value = tensor[uid]
+                            return float(value) if not np.isnan(value) and np.isfinite(value) else default
+                    except Exception:
+                        pass
+                    return default
+                
+                try:
+                    stake = float(subnet.S[uid])
+                except Exception:
+                    stake = 0.0
+
+                hotkey = ''
+                coldkey = ''
+                axon_ip = ''
+                axon_port = 0
+                
+                try:
+                    if hasattr(subnet, 'hotkeys') and len(subnet.hotkeys) > uid:
+                        hotkey = str(subnet.hotkeys[uid])
+                except Exception:
+                    pass
+                
+                try:
+                    if hasattr(subnet, 'coldkeys') and len(subnet.coldkeys) > uid:
+                        coldkey = str(subnet.coldkeys[uid])
+                except Exception:
+                    pass
+                
+                # Extract axon information 
+                try:
+                    if hasattr(subnet, 'axons') and len(subnet.axons) > uid:
+                        axon = subnet.axons[uid]
+                        if hasattr(axon, 'ip'):
+                            axon_ip = str(axon.ip)
+                        if hasattr(axon, 'port'):
+                            axon_port = int(axon.port) if axon.port is not None else 0
+                except Exception as e:
+                    logger.debug(f'Error extracting axon info for uid {uid}: {e}')
+                    pass
+                
+                neuron_data = {
+                    'uid': int(uid),
+                    'hotkey': hotkey,
+                    'stake': stake,
+                    'axon_ip': axon_ip,
+                    'axon_port': axon_port,
+                }
+                data['uids'].append(neuron_data)
+                
+            except Exception as e:
+                logger.error(f'Error processing uid {uid}: {e}')
+                continue
+
+        total_neurons = len(data['uids'])
+        data['aggregated_stats'] = {
+            'total_neurons': total_neurons,
+        }
+        
+        logger.info(f'Successfully processed {total_neurons} neurons')
+        gc.collect()
+
+        metagraph = {
+            'uids': data['uids'],  # original list
+            'by_hotkey': {neuron['hotkey']: neuron for neuron in data['uids']},  # O(1) lookup
+            'by_ip': {neuron['axon_ip']: neuron for neuron in data['uids']},     # O(1) lookup
+            'network_info': data['network_info'],
+            'aggregated_stats': data['aggregated_stats']
+        }
+        
+        return metagraph
+        
+    except Exception as e:
+        logger.error(f'Error fetching metagraph data: {e}')
+        logger.error(f'Traceback: {traceback.format_exc()}')
+        return None
+
+
+async def check_hotkey_stake(
+    metagraph: dict, 
+    hotkey: str, 
+    stake: float
+) -> bool:
+    """Check if hotkey has stake in the metagraph."""
+    if metagraph is None or hotkey is None or stake is None:
+        return False
+    neuron = metagraph['by_hotkey'].get(hotkey)
+    return neuron['stake'] > stake if neuron else False
+
+async def check_request_ip(
+    metagraph: dict, 
+    hotkey: str, 
+    request_ip: str, 
+) -> bool:
+    """Check if request IP matches hotkey's axon IP."""
+    if metagraph is None or hotkey is None or request_ip is None:
+        return false
+    neuron = metagraph['by_hotkey'].get(hotkey)
+    return neuron['axon_ip'] == request_ip if neuron else False

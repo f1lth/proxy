@@ -2,9 +2,13 @@ import os
 import time
 import json
 import httpx
+import sys
+import pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import asyncio
 from dotenv import load_dotenv
 from app.main import SignedResponse
+
 
 load_dotenv()
 BASE_URL = "http://127.0.0.1:8000"
@@ -31,7 +35,11 @@ async def main():
         "messages": [{"role": "user", "content": "Hello, how are you?"}]
     }
     
-    headers = {"Authorization": f"Bearer {OPENROUTER_KEY}", "x-hotkey": HOTKEY}
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_KEY}", 
+        "x-hotkey": HOTKEY,
+        "x-provider": "OPENROUTER"
+        }
     
     response = await call_proxy(request, headers)
     print(json.dumps(response, indent=2))
