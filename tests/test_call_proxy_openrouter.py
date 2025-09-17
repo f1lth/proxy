@@ -2,13 +2,12 @@ import os
 import time
 import json
 import httpx
-import sys
+import pytest
 import pathlib
+import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-import asyncio
 from dotenv import load_dotenv
 from app.main import SignedResponse
-
 
 load_dotenv()
 BASE_URL = "http://127.0.0.1:8000"
@@ -19,9 +18,9 @@ async def call_proxy(
     request: dict, 
     headers: dict
 ) -> SignedResponse:
-    """Call v1/chat/completions with an openrouter key."""
+    """Call v1/chat/completions with an openai key."""
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
             f"{BASE_URL}/v1/chat/completions",
             json=request,
@@ -29,20 +28,15 @@ async def call_proxy(
         )
         return response.json()
 
-async def main():
+@pytest.mark.asyncio
+async def test_call_proxy():
     request = {
-        "model": "google/gemini-flash-1.5",
+        "model": "gpt-4o-mini",
         "messages": [{"role": "user", "content": "Hello, how are you?"}]
     }
-    
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_KEY}", 
-        "x-hotkey": HOTKEY,
-        "x-provider": "OPENROUTER"
-        }
-    
-    response = await call_proxy(request, headers)
-    print(json.dumps(response, indent=2))
+    headers = {"Authorization": f"Bearer {OPENROUTER_KEY}",
+               "x-hotkey": HOTKEY,
+               "x-provider": "OPENROUTER"}
 
-if __name__ == "__main__":
-    asyncio.run(main())
+    response = await call_proxy(request, headers)
+    assert response is not None

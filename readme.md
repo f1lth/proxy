@@ -29,9 +29,9 @@ uv run uvicorn app.main:app --reload
 ```
 
 ## Test
+start the server first then
 ```bash
-uv run tests/get_sig.py      # Test OpenRouter signing
-uv run tests/try_verify.py   # Verify signatures
+uv run pytest
 ```
 
 ## Endpoints

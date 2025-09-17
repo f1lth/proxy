@@ -8,10 +8,12 @@ import httpx
 import uvicorn
 import asyncio
 import logging
+import time
+from contextlib import asynccontextmanager
 from typing import Union, Dict
 from dotenv import load_dotenv
-from pydantic import BaseModel
-from datetime import datetime, timezone
+from pydantic import BaseModel, ConfigDict
+from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, Request, Header, HTTPException
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
@@ -24,22 +26,33 @@ from bitrecs.llms.factory import LLM, LLMFactory
 
 global metagraph
 
+# Simple 5-minute cache for metagraph data
+metagraph_cache = None
+metagraph_cache_timestamp = None
+CACHE_DURATION = 300  # 5 minutes in seconds
+
 load_dotenv()
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
+client = httpx.AsyncClient(timeout=httpx.Timeout(60.0))
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info("Server starting up")
+    logger.info("Creating metagraph data task")
+    asyncio.create_task(update_metagraph_data())
+    yield
+    # Shutdown
+    await client.aclose()
+    logger.info("Server shutting down")
+
+app = FastAPI(lifespan=lifespan)
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
-
-@app.on_event("startup")
-async def startup():
-    asyncio.create_task(update_metagraph_data())
-
-client = httpx.AsyncClient(timeout=httpx.Timeout(60.0))
 
 private_key_path = os.environ.get("PRIVATE_KEY_PATH")
 public_key_path = os.environ.get("PUBLIC_KEY_PATH")
@@ -68,18 +81,16 @@ class ChatCompletionRequest(BaseModel):
     provider: dict | None = None
     transforms: list[str] | None = None
     route: str | None = None
-    class Config:
-        extra = "allow"
+
+    model_config = ConfigDict(extra="allow")
 
 class SignedResponse(BaseModel):
     response: dict
     proof: dict
     signature: str
+    timestamp: str
+    ttl: str
 
-@app.on_event("shutdown")
-async def shutdown():
-    await client.aclose()
-    logger.info("Server shutting down")
 
 @app.get("/health")
 async def health():
@@ -168,19 +179,21 @@ async def forward_proxy_request(
     x_provider: str = Header()
 ) -> SignedResponse:
     request_id = str(uuid.uuid4())
-    logger.info(f"Request {request_id} from hotkey: {x_hotkey}, model: {completion_request.model}")
-    
-    # first make sure hotkey has stake in the metagraph , and the request ip matches that hotkeys's axon ip
-    if not await check_hotkey_stake(x_hotkey):
-        logger.warning(f"Hotkey {x_hotkey} does not have stake in the metagraph")
-        raise HTTPException(400, "INVALID REQUEST HOTKEY MISMATCH")
-    if not await check_request_ip(request.client.host, x_hotkey):
-        logger.warning(f"Request IP {request.client.host} does not match hotkey {x_hotkey}'s axon IP")
-        raise HTTPException(400, "INVALID REQUEST IP MISMATCH")
+    client_ip = request.client.host if request.client else "unknown"
+    logger.info(f"Request {request_id} from hotkey: {x_hotkey}, IP: {client_ip}, model: {completion_request.model}")
 
+    # First make sure hotkey has stake in the metagraph, and the request ip matches that hotkey's axon ip
+    if not await check_hotkey_stake(metagraph, x_hotkey, 100):  # Minimum 100 TAO stake
+        logger.warning(f"Hotkey {x_hotkey} does not have sufficient stake in the metagraph")
+        raise HTTPException(400, "INVALID REQUEST: INSUFFICIENT STAKE")
+
+    if not await check_request_ip(metagraph, x_hotkey, client_ip):
+        logger.warning(f"Request IP {client_ip} does not match hotkey {x_hotkey}'s axon IP")
+        raise HTTPException(400, "INVALID REQUEST: IP MISMATCH")
+    
     try:
         match x_provider:
-            case "CHAT_GPT":
+            case "OPENAI":
                 url = "https://api.openai.com/v1/chat/completions"
             case "OPENROUTER":
                 url = "https://openrouter.ai/api/v1/chat/completions"
@@ -209,26 +222,32 @@ async def forward_proxy_request(
             logger.error(f"Upstream error for request {request_id}: {response.status_code}")
             raise HTTPException(status_code=response.status_code, detail=response.text)
 
-        # Form the proof payload
-        proof = {}
-        proof["timestamp"] = datetime.utcnow().isoformat()        
-        proof["request_hash"] = hashlib.sha256(json.dumps(completion_request.dict()).encode()).hexdigest()
-        proof["response_hash"] = hashlib.sha256(response.content).hexdigest()
-        proof["hotkey"] = x_hotkey
-        proof["model"] = completion_request.model
-        proof["unique_id"] = request_id
+        # Core proof (what gets signed - NO time data)
+        proof = {
+            "request_hash": hashlib.sha256(json.dumps(completion_request.dict()).encode()).hexdigest(),
+            "response_hash": hashlib.sha256(response.content).hexdigest(),
+            "hotkey": x_hotkey,
+            "model": completion_request.model,
+            "unique_id": request_id
+        }
 
-        # Sign the proof
-        serialized_proof = json.dumps(proof).encode()
+        # Time metadata (NOT signed)
+        timestamp = datetime.utcnow().isoformat()
+        ttl = (datetime.utcnow() + timedelta(minutes=5)).isoformat()
+
+        # Sign only the core proof
+        serialized_proof = json.dumps(proof, sort_keys=True).encode()
         signature = PRIVATE_SIGNING_KEY.sign(serialized_proof)
-        
+
         logger.info(f"Request {request_id} completed successfully")
-        
+
         # Return SignedResponse
         return SignedResponse(
             response=response.json(),
             proof=proof,
-            signature=base64.b64encode(signature).decode()
+            signature=base64.b64encode(signature).decode(),
+            timestamp=timestamp,
+            ttl=ttl
         )
 
     except httpx.TimeoutException:
@@ -279,12 +298,22 @@ async def update_metagraph_data():
 
 
 async def get_metagraph_data() -> dict:
-    """Get the metagraph data."""
+    """Get the metagraph data with 5-minute cache."""
+    global metagraph_cache, metagraph_cache_timestamp
+
+    # Check if we have cached data and it's still valid
+    current_time = time.time()
+    if (metagraph_cache is not None and
+        metagraph_cache_timestamp is not None and
+        (current_time - metagraph_cache_timestamp) < CACHE_DURATION):
+        logger.info("Returning cached metagraph data")
+        return metagraph_cache
+
     try:
         network = "finney"
         netuid = 122
 
-        logger.info(f'Fetching metagraph data for {network}:{netuid}...')
+        logger.info(f'Fetching fresh metagraph data for {network}:{netuid}...')
         subnet = bt.metagraph(netuid=netuid, network=network)
 
         # Extract all relevant data from metagraph
@@ -343,7 +372,7 @@ async def get_metagraph_data() -> dict:
                         if hasattr(axon, 'port'):
                             axon_port = int(axon.port) if axon.port is not None else 0
                 except Exception as e:
-                    logger.debug(f'Error extracting axon info for uid {uid}: {e}')
+                    logger.info(f'Error extracting axon info for uid {uid}: {e}')
                     pass
                 
                 neuron_data = {
@@ -367,15 +396,19 @@ async def get_metagraph_data() -> dict:
         logger.info(f'Successfully processed {total_neurons} neurons')
         gc.collect()
 
-        metagraph = {
+        metagraph_result = {
             'uids': data['uids'],  # original list
             'by_hotkey': {neuron['hotkey']: neuron for neuron in data['uids']},  # O(1) lookup
             'by_ip': {neuron['axon_ip']: neuron for neuron in data['uids']},     # O(1) lookup
             'network_info': data['network_info'],
             'aggregated_stats': data['aggregated_stats']
         }
-        
-        return metagraph
+
+        # Update cache
+        metagraph_cache = metagraph_result
+        metagraph_cache_timestamp = time.time()
+
+        return metagraph_result
         
     except Exception as e:
         logger.error(f'Error fetching metagraph data: {e}')
@@ -395,12 +428,12 @@ async def check_hotkey_stake(
     return neuron['stake'] > stake if neuron else False
 
 async def check_request_ip(
-    metagraph: dict, 
-    hotkey: str, 
-    request_ip: str, 
+    metagraph: dict,
+    hotkey: str,
+    request_ip: str,
 ) -> bool:
     """Check if request IP matches hotkey's axon IP."""
     if metagraph is None or hotkey is None or request_ip is None:
-        return false
+        return False
     neuron = metagraph['by_hotkey'].get(hotkey)
     return neuron['axon_ip'] == request_ip if neuron else False
