@@ -5,21 +5,27 @@ import json
 import pytest
 from typing import Dict, Any
 from dotenv import load_dotenv
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ed25519
+# from cryptography.hazmat.primitives import serialization
+# from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
 
 load_dotenv()
-BASE_URL = "http://127.0.0.1:8000"
+BASE_URL = "http://localhost:8000"
 HOTKEY = os.environ.get("HOTKEY")
 OPENROUTER_KEY = os.environ.get("OPENROUTER_KEY")
 
-async def get_public_key():
+async def get_public_key() -> Ed25519PublicKey:
     """Get public key from proxy server."""
+    #self.proxy_key : bytes = get_proxy_public_key(self.proxy_url)
+    #self.public_key = Ed25519PublicKey.from_public_bytes(self.proxy_key)
     async with httpx.AsyncClient(timeout=30.0) as client:
-        pubkey_response = await client.get(f"{BASE_URL}/pubkey")
-        pubkey_response.raise_for_status()
-        pubkey_string = json.loads(pubkey_response.text)["PUBKEY"]
-        return serialization.load_pem_public_key(pubkey_string.encode())
+        public_key_response = await client.get(f"{BASE_URL}/public_key")
+        public_key_response.raise_for_status()
+        public_key_string = json.loads(public_key_response.text)["public_key"]
+        raw_bytes = bytes.fromhex(public_key_string)
+        return Ed25519PublicKey.from_public_bytes(raw_bytes)
+        
 
 async def call_proxy_server(
     request: dict, 
@@ -43,14 +49,17 @@ async def call_proxy_server(
 
 def verify_signature(
     response: Dict[str, Any], 
-    public_key: ed25519.Ed25519PublicKey
+    public_key: Ed25519PublicKey
 ) -> bool:
     """Verify the signature of the response."""
     proof = response["proof"]
     signature_b64 = response["signature"]
 
+    print(f"Proof: {proof}")
+    print(f"Signature (base64): {signature_b64}")
+
     signature_bytes = base64.b64decode(signature_b64)
-    serialized_proof = json.dumps(proof).encode()
+    serialized_proof = json.dumps(proof, sort_keys=True).encode()  # Added sort_keys=True
 
     try:
         public_key.verify(signature_bytes, serialized_proof)
@@ -73,3 +82,21 @@ async def test_verify_signature():
     response = await call_proxy_server(request, OPENROUTER_KEY, HOTKEY)
 
     assert verify_signature(response, public_key), "Signature verification failed"
+
+
+async def main():
+    public_key = await get_public_key()
+
+    request = {
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": "Hello, how are you?"}]
+    }
+
+    # Returns a SignedResponse object with openrouter package, proof, signature
+    response = await call_proxy_server(request, OPENROUTER_KEY, HOTKEY)
+
+    assert verify_signature(response, public_key), "Signature verification failed"
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())

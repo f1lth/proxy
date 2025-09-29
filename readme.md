@@ -37,4 +37,4 @@ uv run pytest
 ## Endpoints
 Server runs on `http://127.0.0.1:8000`
 * `POST /v1/chat/completions` - Proxy endpoint
-* `GET /pubkey` - Get public key
+* `GET /public_key` - Get public key

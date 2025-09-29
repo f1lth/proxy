@@ -4,23 +4,27 @@ import json
 import uuid
 import hashlib
 import base64
+from fastapi.responses import JSONResponse
 import httpx
 import asyncio
 import logging
 import time
+import numpy as np
 from dotenv import load_dotenv
 load_dotenv()
+import bittensor as bt
 from contextlib import asynccontextmanager
 from typing import Union, Dict
 from pydantic import BaseModel, ConfigDict
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request, Header, HTTPException
-from cryptography.hazmat.primitives import serialization
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from cryptography.hazmat.primitives import serialization
 
-import bittensor as bt
 
 global metagraph
 
@@ -50,17 +54,24 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-private_key_path = os.environ.get("PRIVATE_KEY_PATH")
-public_key_path = os.environ.get("PUBLIC_KEY_PATH")
+B64_PRIVATE_KEY = os.environ.get("B64_PRIVATE_KEY")
+if not B64_PRIVATE_KEY:
+    raise ValueError("B64_PRIVATE_KEY environment variable not set")
+base64_key = base64.b64decode(B64_PRIVATE_KEY)
+PRIVATE_KEY = Ed25519PrivateKey.from_private_bytes(base64_key)
+PUBLIC_KEY = PRIVATE_KEY.public_key()
 
-with open(private_key_path, "rb") as f:
-    PRIVATE_SIGNING_KEY = serialization.load_pem_private_key(
-        f.read(),
-        password=None,
-    )
+#private_key_path = os.environ.get("PRIVATE_KEY_PATH")
+#public_key_path = os.environ.get("PUBLIC_KEY_PATH")
 
-with open(public_key_path, "rb") as f:
-    PUBLIC_SIGNING_KEY = f.read()
+# with open(private_key_path, "rb") as f:
+#     PRIVATE_SIGNING_KEY = serialization.load_pem_private_key(
+#         f.read(),
+#         password=None,
+#     )
+
+# with open(public_key_path, "rb") as f:
+#     PUBLIC_SIGNING_KEY = f.read()
 
 class ChatCompletionRequest(BaseModel):
     model: str
@@ -93,78 +104,20 @@ async def health():
     node_count = len(metagraph['uids']) if metagraph else 0
     return {"status": "healthy", "nodes": node_count}
  
-@app.get("/pubkey")
-async def pubkey(request: Request) -> Dict[str, str]:
-    return {"PUBKEY": PUBLIC_SIGNING_KEY.decode()}
+# @app.get("/public_key")
+# async def public_key(request: Request) -> Dict[str, str]:
+#     return {"public_key": PUBLIC_KEY.decode()}
 
-# @app.post("/v1/chat/completions", response_model=SignedResponse)
-# @limiter.limit("60/minute")
-# async def forward_proxy_request(
-#     request: Request,
-#     completion_request: ChatCompletionRequest,
-#     authorization: str = Header(),  
-#     x_hotkey: str = Header()
-# ) -> SignedResponse:
-#     request_id = str(uuid.uuid4())
-#     logger.info(f"Request {request_id} from hotkey: {x_hotkey}, model: {completion_request.model}")
-    
-#     try:
-#         # Filter openai or openrouter
-#         if authorization.startswith("Bearer sk-or-"):
-#             url = "https://openrouter.ai/api/v1/chat/completions"
-#         elif authorization.startswith("Bearer sk-"):
-#             url = "https://api.openai.com/v1/chat/completions"
-#         else:
-#             logger.warning(f"Unknown API key format for request {request_id}")
-#             raise HTTPException(400, "Unknown API key format")
+@app.get("/public_key")
+@limiter.limit("180/minute")
+async def get_public_key(request: Request):
+    public_key_raw_bytes = PUBLIC_KEY.public_bytes(
+        encoding=Encoding.Raw,
+        format=PublicFormat.Raw
+    )
+    public_key_hex = public_key_raw_bytes.hex()
+    return JSONResponse(status_code=200, content={"public_key": public_key_hex})
 
-#         payload = completion_request.dict(exclude_unset=True)
-
-#         # Send the request to openai or openrouter
-#         response = await client.post(
-#             url,
-#             json=payload,
-#             headers={"Authorization": authorization}
-#         )
-        
-#         if response.status_code != 200:
-#             logger.error(f"Upstream error for request {request_id}: {response.status_code}")
-#             raise HTTPException(status_code=response.status_code, detail=response.text)
-
-#         # Form the proof payload
-#         proof = {}
-#         proof["timestamp"] = datetime.utcnow().isoformat()        
-#         proof["request_hash"] = hashlib.sha256(json.dumps(completion_request.dict()).encode()).hexdigest()
-#         proof["response_hash"] = hashlib.sha256(response.content).hexdigest()
-#         proof["hotkey"] = x_hotkey
-#         proof["model"] = completion_request.model
-#         proof["unique_id"] = request_id
-
-#         # Sign the proof
-#         serialized_proof = json.dumps(proof).encode()
-#         signature = PRIVATE_SIGNING_KEY.sign(serialized_proof)
-        
-#         logger.info(f"Request {request_id} completed successfully")
-        
-#         # Return SignedResponse
-#         return SignedResponse(
-#             response=response.json(),
-#             proof=proof,
-#             signature=base64.b64encode(signature).decode()
-#         )
-
-#     except httpx.TimeoutException:
-#         logger.error(f"Timeout for request {request_id}")
-#         raise HTTPException(504, "Upstream timeout")
-#     except httpx.HTTPError as e:
-#         logger.error(f"HTTP error for request {request_id}: {str(e)}")
-#         raise HTTPException(502, f"Upstream error: {str(e)}")
-#     except HTTPException as e:
-#         raise e
-#     except Exception as e:
-#         logger.error(f"Unexpected error for request {request_id}: {str(e)}")
-#         raise HTTPException(status_code=500, detail=str(e))
-    
 
 @app.post("/v1/chat/completions", response_model=SignedResponse)
 @limiter.limit("60/minute")
@@ -235,7 +188,7 @@ async def forward_proxy_request(
 
         # Sign only the core proof
         serialized_proof = json.dumps(proof, sort_keys=True).encode()
-        signature = PRIVATE_SIGNING_KEY.sign(serialized_proof)
+        signature = PRIVATE_KEY.sign(serialized_proof)
 
         logger.info(f"Request {request_id} completed successfully")
 
@@ -267,7 +220,7 @@ async def verify_endpoint(
     response: SignedResponse
 ) -> Dict[str, Union[bool, str]]:
     try:
-        public_key = serialization.load_pem_public_key(PUBLIC_SIGNING_KEY)
+        public_key : Ed25519PublicKey = serialization.load_pem_public_key(PUBLIC_KEY)
         public_key.verify(
             base64.b64decode(response.signature), 
             json.dumps(response.proof).encode()
