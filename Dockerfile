@@ -9,6 +9,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     uv sync --frozen --no-install-project
 
+# COPY private.pem and public.pem to /app
+COPY private.pem /app/private.pem
+COPY public.pem /app/public.pem
+
+
 # Copy the project
 ADD . /app
 

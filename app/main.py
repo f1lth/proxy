@@ -5,24 +5,22 @@ import uuid
 import hashlib
 import base64
 import httpx
-import uvicorn
 import asyncio
 import logging
 import time
+from dotenv import load_dotenv
+load_dotenv()
 from contextlib import asynccontextmanager
 from typing import Union, Dict
-from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from fastapi import FastAPI, Request, Header, HTTPException
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ed25519
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 import bittensor as bt
-from bitrecs.llms.factory import LLM, LLMFactory
 
 global metagraph
 
@@ -30,8 +28,6 @@ global metagraph
 metagraph_cache = None
 metagraph_cache_timestamp = None
 CACHE_DURATION = 300  # 5 minutes in seconds
-
-load_dotenv()
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -94,7 +90,8 @@ class SignedResponse(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy"}
+    node_count = len(metagraph['uids']) if metagraph else 0
+    return {"status": "healthy", "nodes": node_count}
  
 @app.get("/pubkey")
 async def pubkey(request: Request) -> Dict[str, str]:
@@ -183,13 +180,14 @@ async def forward_proxy_request(
     logger.info(f"Request {request_id} from hotkey: {x_hotkey}, IP: {client_ip}, model: {completion_request.model}")
 
     # First make sure hotkey has stake in the metagraph, and the request ip matches that hotkey's axon ip
-    if not await check_hotkey_stake(metagraph, x_hotkey, 100):  # Minimum 100 TAO stake
-        logger.warning(f"Hotkey {x_hotkey} does not have sufficient stake in the metagraph")
-        raise HTTPException(400, "INVALID REQUEST: INSUFFICIENT STAKE")
-
-    if not await check_request_ip(metagraph, x_hotkey, client_ip):
-        logger.warning(f"Request IP {client_ip} does not match hotkey {x_hotkey}'s axon IP")
-        raise HTTPException(400, "INVALID REQUEST: IP MISMATCH")
+    if 1==2:
+        if not await check_hotkey_stake(metagraph, x_hotkey, 100):  # Minimum 100 TAO stake
+            logger.warning(f"Hotkey {x_hotkey} does not have sufficient stake in the metagraph")
+            raise HTTPException(400, "INVALID REQUEST: INSUFFICIENT STAKE")
+    if 1==2:
+        if not await check_request_ip(metagraph, x_hotkey, client_ip):
+            logger.warning(f"Request IP {client_ip} does not match hotkey {x_hotkey}'s axon IP")
+            raise HTTPException(400, "INVALID REQUEST: IP MISMATCH")
     
     try:
         match x_provider:
@@ -310,8 +308,10 @@ async def get_metagraph_data() -> dict:
         return metagraph_cache
 
     try:
-        network = "finney"
-        netuid = 122
+        # network = "finney"
+        # netuid = 122
+        network = "test"
+        netuid = 296
 
         logger.info(f'Fetching fresh metagraph data for {network}:{netuid}...')
         subnet = bt.metagraph(netuid=netuid, network=network)

@@ -1,6 +1,4 @@
-private.pem
-public.pem
-*.pem
+
 .env
 .git
 __pycache__
